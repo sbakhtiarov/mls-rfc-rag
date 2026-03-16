@@ -1,2 +1,0 @@
-[console_scripts]
-rfc-rag = rfc_rag.cli:main

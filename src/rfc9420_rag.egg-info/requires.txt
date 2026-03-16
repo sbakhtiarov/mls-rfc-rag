@@ -1,6 +1,0 @@
-openai>=1.76.0
-psycopg[binary]>=3.2.6
-typer>=0.16.0
-
-[test]
-pytest>=8.3.5
