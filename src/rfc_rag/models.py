@@ -30,6 +30,7 @@ class IngestionRun:
     chunk_size: int
     embedding_model: str
     created_at: datetime
+    is_active: bool
 
 
 @dataclass(frozen=True)

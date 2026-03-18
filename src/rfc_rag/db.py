@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     strategy TEXT NOT NULL,
     chunk_size INTEGER NOT NULL,
     embedding_model TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -41,6 +42,11 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_cosine_idx
     WITH (lists = 100);
 """
 
+ALTER_SCHEMA_SQL = """
+ALTER TABLE ingestion_runs
+ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT FALSE;
+"""
+
 
 class Database:
     def __init__(self, dsn: str) -> None:
@@ -50,6 +56,7 @@ class Database:
         with psycopg.connect(self._dsn, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
+                cur.execute(ALTER_SCHEMA_SQL)
 
     def create_run_with_chunks(
         self,
@@ -69,8 +76,15 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO ingestion_runs (name, source, strategy, chunk_size, embedding_model)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO ingestion_runs (
+                        name,
+                        source,
+                        strategy,
+                        chunk_size,
+                        embedding_model,
+                        is_active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, FALSE)
                     RETURNING id
                     """,
                     (name, source, strategy, chunk_size, embedding_model),
@@ -116,7 +130,7 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at
+                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at, is_active
                     FROM ingestion_runs
                     ORDER BY created_at DESC, id DESC
                     """
@@ -130,7 +144,7 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at
+                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at, is_active
                     FROM ingestion_runs
                     WHERE id = %s
                     """,
@@ -142,6 +156,59 @@ class Database:
             return None
 
         return IngestionRun(**row)
+
+    def get_active_run(self) -> IngestionRun | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at, is_active
+                    FROM ingestion_runs
+                    WHERE is_active = TRUE
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        return IngestionRun(**row)
+
+    def set_active_run(self, run_id: int) -> IngestionRun | None:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at, is_active
+                    FROM ingestion_runs
+                    WHERE id = %s
+                    """,
+                    (run_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+
+                cur.execute("UPDATE ingestion_runs SET is_active = FALSE WHERE is_active = TRUE")
+                cur.execute("UPDATE ingestion_runs SET is_active = TRUE WHERE id = %s", (run_id,))
+                cur.execute(
+                    """
+                    SELECT id, name, source, strategy, chunk_size, embedding_model, created_at, is_active
+                    FROM ingestion_runs
+                    WHERE id = %s
+                    """,
+                    (run_id,),
+                )
+                updated_row = cur.fetchone()
+
+            conn.commit()
+
+        if updated_row is None:
+            return None
+
+        return IngestionRun(**updated_row)
 
     def query_chunks(
         self,

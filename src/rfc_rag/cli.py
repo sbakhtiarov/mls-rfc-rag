@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from pathlib import Path
 
@@ -9,7 +10,9 @@ from rfc_rag.chunking import chunk_sections
 from rfc_rag.config import Settings, load_settings
 from rfc_rag.db import Database
 from rfc_rag.embeddings import OpenAIEmbedder
+from rfc_rag.mcp_server import create_mcp_server
 from rfc_rag.parser import parse_sections
+from rfc_rag.search_service import SearchResponse, serialize_search_response, search_chunks
 
 
 app = typer.Typer(help="RFC 9420 RAG experimentation CLI.")
@@ -67,7 +70,7 @@ def ingest(
         embeddings=embeddings,
     )
 
-    typer.echo(f"Ingested {len(chunks)} chunks into run {run_id}.")
+    typer.echo(f"Ingested {len(chunks)} chunks into run {run_id}. Active: no.")
 
 
 @app.command("list-runs")
@@ -85,6 +88,7 @@ def list_runs() -> None:
                 [
                     f"id={run.id}",
                     f"name={run.name}",
+                    f"active={'yes' if run.is_active else 'no'}",
                     f"strategy={run.strategy}",
                     f"chunk_size={run.chunk_size}",
                     f"model={run.embedding_model}",
@@ -95,37 +99,72 @@ def list_runs() -> None:
         )
 
 
+@app.command("set-active-run")
+def set_active_run(
+    run_id: int = typer.Option(..., min=1, help="Ingestion run ID to mark as active."),
+) -> None:
+    """Mark one ingestion run as the active default for queries."""
+    settings = _load_cli_settings(require_openai=False)
+    run = Database(settings.database_url).set_active_run(run_id)
+    if run is None:
+        raise typer.BadParameter(f"Run {run_id} does not exist.")
+
+    typer.echo(f"Active run set to {run.id} ({run.name}).")
+
+
 @app.command("query")
 def query(
-    run_id: int = typer.Option(..., min=1, help="Ingestion run ID."),
+    run_id: int | None = typer.Option(None, min=1, help="Ingestion run ID."),
     query: str = typer.Option(..., help="Search text."),
     top_k: int = typer.Option(5, min=1, help="Number of results to return."),
+    json_output: bool = typer.Option(False, "--json", help="Return structured JSON output."),
 ) -> None:
     """Run a similarity search against one ingestion run."""
     settings = _load_cli_settings(require_openai=True)
     database = Database(settings.database_url)
-    run = database.get_run(run_id)
-    if run is None:
-        raise typer.BadParameter(f"Run {run_id} does not exist.")
+    try:
+        response = search_chunks(
+            database=database,
+            embedder_factory=lambda model: OpenAIEmbedder(
+                api_key=settings.openai_api_key or "",
+                model=model,
+            ),
+            query=query,
+            top_k=top_k,
+            run_id=run_id,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
-    embedder = OpenAIEmbedder(
-        api_key=settings.openai_api_key or "",
-        model=run.embedding_model,
-    )
-    query_embedding = embedder.embed_text(query)
-    results = database.query_chunks(run_id=run_id, query_embedding=query_embedding, top_k=top_k)
+    if json_output:
+        typer.echo(json.dumps(serialize_search_response(response), indent=2))
+        return
 
-    if not results:
+    if not response.results:
+        if json_output:
+            typer.echo(json.dumps(serialize_search_response(response), indent=2))
+            return
         typer.echo("No matching chunks found.")
         return
 
-    for index, result in enumerate(results, start=1):
+    for index, result in enumerate(response.results, start=1):
         typer.echo(f"[{index}] score={result.score:.4f}")
         typer.echo(f"chunk_id={result.chunk_id}")
         typer.echo(f"source={result.source}")
         typer.echo(f"section={result.section}")
         typer.echo(f"preview={_preview_text(result.content)}")
         typer.echo("")
+
+
+@app.command("serve-mcp")
+def serve_mcp(
+    host: str = typer.Option("127.0.0.1", help="Host interface for the MCP HTTP server."),
+    port: int = typer.Option(8000, min=1, max=65535, help="Port for the MCP HTTP server."),
+) -> None:
+    """Serve the RAG search tool as an MCP streamable HTTP server."""
+    settings = _load_cli_settings(require_openai=True)
+    server = create_mcp_server(settings, host=host, port=port)
+    server.run(transport="streamable-http")
 
 
 def main() -> None:
