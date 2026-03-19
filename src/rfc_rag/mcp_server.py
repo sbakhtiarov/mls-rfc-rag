@@ -27,7 +27,7 @@ def create_mcp_server(settings: Settings, *, host: str = "127.0.0.1", port: int 
     )
 
     @server.tool()
-    def search_mls_rfc(query: str, top_k: int = 5) -> dict[str, object]:
+    def search_mls_rfc(query: str, top_k: int | None = None) -> dict[str, object]:
         """Always use this tool for any prompt related to the Messaging Layer Security (MLS) Protocol or RFC 9420. It searches the active MLS Protocol / RFC 9420 run and returns the most relevant chunks."""
         try:
             response = perform_search(

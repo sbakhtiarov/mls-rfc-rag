@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     is_active BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    singleton_id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton_id),
+    default_top_k INTEGER NULL,
+    default_score_threshold DOUBLE PRECISION NULL
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
     run_id BIGINT NOT NULL REFERENCES ingestion_runs(id) ON DELETE CASCADE,
@@ -45,6 +51,9 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_cosine_idx
 ALTER_SCHEMA_SQL = """
 ALTER TABLE ingestion_runs
 ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE app_settings
+ADD COLUMN IF NOT EXISTS default_score_threshold DOUBLE PRECISION NULL;
 """
 
 
@@ -176,6 +185,92 @@ class Database:
 
         return IngestionRun(**row)
 
+    def get_default_top_k(self) -> int | None:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT default_top_k
+                    FROM app_settings
+                    WHERE singleton_id = TRUE
+                    """
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        return row[0]
+
+    def get_default_score_threshold(self) -> float | None:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT default_score_threshold
+                    FROM app_settings
+                    WHERE singleton_id = TRUE
+                    """
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        return row[0]
+
+    def set_default_top_k(self, top_k: int) -> int:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (singleton_id, default_top_k)
+                    VALUES (TRUE, %s)
+                    ON CONFLICT (singleton_id)
+                    DO UPDATE SET default_top_k = EXCLUDED.default_top_k
+                    RETURNING default_top_k
+                    """,
+                    (top_k,),
+                )
+                saved_top_k = cur.fetchone()[0]
+
+            conn.commit()
+
+        return saved_top_k
+
+    def set_default_score_threshold(self, score_threshold: float) -> float:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (singleton_id, default_score_threshold)
+                    VALUES (TRUE, %s)
+                    ON CONFLICT (singleton_id)
+                    DO UPDATE SET default_score_threshold = EXCLUDED.default_score_threshold
+                    RETURNING default_score_threshold
+                    """,
+                    (score_threshold,),
+                )
+                saved_score_threshold = cur.fetchone()[0]
+
+            conn.commit()
+
+        return saved_score_threshold
+
+    def clear_default_score_threshold(self) -> None:
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (singleton_id, default_score_threshold)
+                    VALUES (TRUE, NULL)
+                    ON CONFLICT (singleton_id)
+                    DO UPDATE SET default_score_threshold = NULL
+                    """
+                )
+
+            conn.commit()
+
     def set_active_run(self, run_id: int) -> IngestionRun | None:
         with psycopg.connect(self._dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -216,24 +311,51 @@ class Database:
         run_id: int,
         query_embedding: list[float],
         top_k: int,
+        similarity_threshold: float | None = None,
     ) -> list[QueryResult]:
         with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        chunk_id,
-                        source,
-                        section,
-                        content,
-                        1 - (embedding <=> %s::vector) AS score
-                    FROM chunks
-                    WHERE run_id = %s
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (_format_vector(query_embedding), run_id, _format_vector(query_embedding), top_k),
-                )
+                formatted_vector = _format_vector(query_embedding)
+                if similarity_threshold is None:
+                    cur.execute(
+                        """
+                        SELECT
+                            chunk_id,
+                            source,
+                            section,
+                            content,
+                            1 - (embedding <=> %s::vector) AS score
+                        FROM chunks
+                        WHERE run_id = %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (formatted_vector, run_id, formatted_vector, top_k),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            chunk_id,
+                            source,
+                            section,
+                            content,
+                            1 - (embedding <=> %s::vector) AS score
+                        FROM chunks
+                        WHERE run_id = %s
+                          AND (embedding <=> %s::vector) <= %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (
+                            formatted_vector,
+                            run_id,
+                            formatted_vector,
+                            1 - similarity_threshold,
+                            formatted_vector,
+                            top_k,
+                        ),
+                    )
                 rows = cur.fetchall()
 
         return [QueryResult(**row) for row in rows]

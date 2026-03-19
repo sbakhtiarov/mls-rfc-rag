@@ -13,7 +13,7 @@ from rfc_rag.chunking import chunk_sections
 from rfc_rag.db import Database
 from rfc_rag.models import IngestionRun, QueryResult
 from rfc_rag.parser import parse_sections
-from rfc_rag.search_service import MAX_TOP_K
+from rfc_rag.search_service import DEFAULT_TOP_K, MAX_TOP_K
 
 
 RFC_PATH = Path(__file__).resolve().parents[1] / "rfc9420.txt"
@@ -69,6 +69,7 @@ def test_init_db_ingest_and_query_round_trip() -> None:
         run_id=run_id,
         query_embedding=embedder.embed_text("Messaging Layer Security"),
         top_k=3,
+        similarity_threshold=None,
     )
 
     assert results
@@ -157,9 +158,23 @@ def test_query_json_outputs_run_metadata_and_results(monkeypatch: pytest.MonkeyP
         def get_active_run(self) -> IngestionRun:
             return self.get_run(11)
 
-        def query_chunks(self, *, run_id: int, query_embedding: list[float], top_k: int) -> list[QueryResult]:
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
             assert run_id == 11
             assert top_k == 2
+            assert similarity_threshold is None
             assert query_embedding == _fake_embedding("external commits")
             return [
                 QueryResult(
@@ -201,6 +216,12 @@ def test_query_without_run_id_requires_active_run(monkeypatch: pytest.MonkeyPatc
         def __init__(self, dsn: str) -> None:
             self.dsn = dsn
 
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
+
         def get_active_run(self):
             return None
 
@@ -219,6 +240,12 @@ def test_query_rejects_top_k_above_limit(monkeypatch: pytest.MonkeyPatch) -> Non
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
             self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
 
         def get_active_run(self):
             return IngestionRun(
@@ -247,3 +274,398 @@ def test_query_rejects_top_k_above_limit(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert result.exit_code != 0
     assert f"top_k must be less than or equal to {MAX_TOP_K}" in result.output
+
+
+def test_set_top_k_persists_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def set_default_top_k(self, top_k: int) -> int:
+            assert top_k == 8
+            return top_k
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+
+    result = RUNNER.invoke(app, ["set-top-k", "--top-k", "8"])
+
+    assert result.exit_code == 0
+    assert "Default top_k set to 8." in result.output
+
+
+def test_set_top_k_rejects_top_k_above_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+
+    result = RUNNER.invoke(app, ["set-top-k", "--top-k", str(MAX_TOP_K + 1)])
+
+    assert result.exit_code != 0
+    assert f"top_k must be less than or equal to {MAX_TOP_K}" in result.output
+
+
+def test_set_score_threshold_persists_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def set_default_score_threshold(self, score_threshold: float) -> float:
+            assert score_threshold == 0.75
+            return score_threshold
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+
+    result = RUNNER.invoke(app, ["set-score-threshold", "--score-threshold", "0.75"])
+
+    assert result.exit_code == 0
+    assert "Default score threshold set to 0.75." in result.output
+
+
+def test_set_score_threshold_rejects_out_of_range_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+
+    below = RUNNER.invoke(app, ["set-score-threshold", "--score-threshold", "-0.01"])
+    above = RUNNER.invoke(app, ["set-score-threshold", "--score-threshold", "1.01"])
+
+    assert below.exit_code != 0
+    assert "score_threshold must be between 0.0 and 1.0 inclusive" in below.output
+    assert above.exit_code != 0
+    assert "score_threshold must be between 0.0 and 1.0 inclusive" in above.output
+
+
+def test_clear_score_threshold_clears_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    state = {"cleared": False}
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def clear_default_score_threshold(self) -> None:
+            state["cleared"] = True
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+
+    result = RUNNER.invoke(app, ["clear-score-threshold"])
+
+    assert result.exit_code == 0
+    assert state["cleared"] is True
+    assert "Default score threshold cleared." in result.output
+
+
+def test_query_uses_saved_default_top_k_when_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return 3
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
+
+        def get_active_run(self):
+            return IngestionRun(
+                id=1,
+                name="active-run",
+                source=str(RFC_PATH),
+                strategy="fixed",
+                chunk_size=700,
+                embedding_model="fake-embedding-model",
+                created_at=_created_at(),
+                is_active=True,
+            )
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
+            assert top_k == 3
+            assert similarity_threshold is None
+            return [
+                QueryResult(
+                    chunk_id="fixed:1-introduction:0",
+                    source=str(RFC_PATH),
+                    section="1 | Introduction",
+                    content="Chunk body",
+                    score=0.91,
+                )
+            ]
+
+    class FakeOpenAIEmbedder:
+        def __init__(self, api_key: str, model: str) -> None:
+            self.api_key = api_key
+            self.model = model
+
+        def embed_text(self, text: str) -> list[float]:
+            return _fake_embedding(text)
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+
+    result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+
+
+def test_query_explicit_top_k_overrides_saved_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return 4
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
+
+        def get_active_run(self):
+            return IngestionRun(
+                id=1,
+                name="active-run",
+                source=str(RFC_PATH),
+                strategy="fixed",
+                chunk_size=700,
+                embedding_model="fake-embedding-model",
+                created_at=_created_at(),
+                is_active=True,
+            )
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
+            assert top_k == 2
+            assert similarity_threshold is None
+            return [
+                QueryResult(
+                    chunk_id="fixed:1-introduction:0",
+                    source=str(RFC_PATH),
+                    section="1 | Introduction",
+                    content="Chunk body",
+                    score=0.91,
+                )
+            ]
+
+    class FakeOpenAIEmbedder:
+        def __init__(self, api_key: str, model: str) -> None:
+            self.api_key = api_key
+            self.model = model
+
+        def embed_text(self, text: str) -> list[float]:
+            return _fake_embedding(text)
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+
+    result = RUNNER.invoke(app, ["query", "--query", "external commits", "--top-k", "2", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+
+
+def test_query_uses_builtin_default_top_k_when_nothing_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return None
+
+        def get_active_run(self):
+            return IngestionRun(
+                id=1,
+                name="active-run",
+                source=str(RFC_PATH),
+                strategy="fixed",
+                chunk_size=700,
+                embedding_model="fake-embedding-model",
+                created_at=_created_at(),
+                is_active=True,
+            )
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
+            assert top_k == DEFAULT_TOP_K
+            assert similarity_threshold is None
+            return [
+                QueryResult(
+                    chunk_id="fixed:1-introduction:0",
+                    source=str(RFC_PATH),
+                    section="1 | Introduction",
+                    content="Chunk body",
+                    score=0.91,
+                )
+            ]
+
+    class FakeOpenAIEmbedder:
+        def __init__(self, api_key: str, model: str) -> None:
+            self.api_key = api_key
+            self.model = model
+
+        def embed_text(self, text: str) -> list[float]:
+            return _fake_embedding(text)
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+
+    result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+
+
+def test_query_uses_saved_score_threshold_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return 0.75
+
+        def get_active_run(self):
+            return IngestionRun(
+                id=1,
+                name="active-run",
+                source=str(RFC_PATH),
+                strategy="fixed",
+                chunk_size=700,
+                embedding_model="fake-embedding-model",
+                created_at=_created_at(),
+                is_active=True,
+            )
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
+            assert top_k == DEFAULT_TOP_K
+            assert similarity_threshold == 0.75
+            return [
+                QueryResult(
+                    chunk_id="fixed:1-introduction:0",
+                    source=str(RFC_PATH),
+                    section="1 | Introduction",
+                    content="Chunk body",
+                    score=0.91,
+                )
+            ]
+
+    class FakeOpenAIEmbedder:
+        def __init__(self, api_key: str, model: str) -> None:
+            self.api_key = api_key
+            self.model = model
+
+        def embed_text(self, text: str) -> list[float]:
+            return _fake_embedding(text)
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+
+    result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+
+
+def test_query_reports_no_results_when_saved_score_threshold_filters_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FakeDatabase:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+        def get_default_top_k(self) -> int | None:
+            return None
+
+        def get_default_score_threshold(self) -> float | None:
+            return 0.95
+
+        def get_active_run(self):
+            return IngestionRun(
+                id=1,
+                name="active-run",
+                source=str(RFC_PATH),
+                strategy="fixed",
+                chunk_size=700,
+                embedding_model="fake-embedding-model",
+                created_at=_created_at(),
+                is_active=True,
+            )
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ) -> list[QueryResult]:
+            assert similarity_threshold == 0.95
+            return []
+
+    class FakeOpenAIEmbedder:
+        def __init__(self, api_key: str, model: str) -> None:
+            self.api_key = api_key
+            self.model = model
+
+        def embed_text(self, text: str) -> list[float]:
+            return _fake_embedding(text)
+
+    monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
+    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+
+    result = RUNNER.invoke(app, ["query", "--query", "external commits"])
+
+    assert result.exit_code == 0
+    assert "No matching chunks found." in result.output
+
+
+def _created_at() -> datetime:
+    return datetime(2026, 3, 18, 12, 0, tzinfo=timezone.utc)

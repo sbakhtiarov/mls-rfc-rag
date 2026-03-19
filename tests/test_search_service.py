@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 import pytest
 
 from rfc_rag.models import IngestionRun, QueryResult
-from rfc_rag.search_service import SearchResponse, search_chunks, serialize_search_response
+from rfc_rag.search_service import (
+    SearchResponse,
+    search_chunks,
+    serialize_search_response,
+    validate_score_threshold,
+)
 
 
 def test_search_chunks_returns_shared_payload() -> None:
@@ -52,11 +57,98 @@ def test_search_chunks_rejects_invalid_top_k() -> None:
         )
 
 
+def test_search_chunks_uses_saved_default_top_k_when_omitted() -> None:
+    run = _make_run(is_active=True)
+    results = [
+        QueryResult(
+            chunk_id="fixed:1-introduction:0",
+            source="rfc9420.txt",
+            section="1 | Introduction",
+            content="First chunk",
+            score=0.9,
+        ),
+        QueryResult(
+            chunk_id="fixed:1-introduction:1",
+            source="rfc9420.txt",
+            section="1 | Introduction",
+            content="Second chunk",
+            score=0.8,
+        ),
+    ]
+    response = search_chunks(
+        database=FakeDatabase(run=run, active_run=run, results=results, default_top_k=1),
+        embedder=FakeEmbedder(),
+        query="external commits",
+    )
+
+    assert len(response.results) == 1
+    assert response.results[0].chunk_id == "fixed:1-introduction:0"
+
+
+def test_search_chunks_uses_saved_score_threshold_when_present() -> None:
+    run = _make_run(is_active=True)
+    results = [
+        QueryResult(
+            chunk_id="fixed:1-introduction:0",
+            source="rfc9420.txt",
+            section="1 | Introduction",
+            content="First chunk",
+            score=0.9,
+        )
+    ]
+    response = search_chunks(
+        database=FakeDatabase(
+            run=run,
+            active_run=run,
+            results=results,
+            default_score_threshold=0.75,
+        ),
+        embedder=FakeEmbedder(),
+        query="external commits",
+    )
+
+    assert len(response.results) == 1
+    assert response.results[0].chunk_id == "fixed:1-introduction:0"
+
+
+def test_search_chunks_rejects_invalid_saved_score_threshold() -> None:
+    run = _make_run(is_active=True)
+    with pytest.raises(ValueError, match="score_threshold must be between 0.0 and 1.0 inclusive"):
+        search_chunks(
+            database=FakeDatabase(
+                run=run,
+                active_run=run,
+                results=[],
+                default_score_threshold=1.1,
+            ),
+            embedder=FakeEmbedder(),
+            query="external commits",
+        )
+
+
+def test_validate_score_threshold_rejects_out_of_range_values() -> None:
+    with pytest.raises(ValueError, match="score_threshold must be between 0.0 and 1.0 inclusive"):
+        validate_score_threshold(-0.1)
+
+    with pytest.raises(ValueError, match="score_threshold must be between 0.0 and 1.0 inclusive"):
+        validate_score_threshold(1.1)
+
+
 class FakeDatabase:
-    def __init__(self, *, run, active_run, results):
+    def __init__(
+        self,
+        *,
+        run,
+        active_run,
+        results,
+        default_top_k=None,
+        default_score_threshold=None,
+    ):
         self._run = run
         self._active_run = active_run
         self._results = results
+        self._default_top_k = default_top_k
+        self._default_score_threshold = default_score_threshold
 
     def get_run(self, run_id: int):
         return self._run
@@ -64,8 +156,22 @@ class FakeDatabase:
     def get_active_run(self):
         return self._active_run
 
-    def query_chunks(self, *, run_id: int, query_embedding: list[float], top_k: int):
+    def get_default_top_k(self):
+        return self._default_top_k
+
+    def get_default_score_threshold(self):
+        return self._default_score_threshold
+
+    def query_chunks(
+        self,
+        *,
+        run_id: int,
+        query_embedding: list[float],
+        top_k: int,
+        similarity_threshold: float | None = None,
+    ):
         assert query_embedding == [0.5, 0.25]
+        assert similarity_threshold == self._default_score_threshold
         return self._results[:top_k]
 
 

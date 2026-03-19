@@ -70,9 +70,50 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
         def get_active_run(self):
             return run if self.return_active else None
 
-        def query_chunks(self, *, run_id: int, query_embedding: list[float], top_k: int):
+        def get_default_top_k(self):
+            return 3
+
+        def get_default_score_threshold(self):
+            return 0.9
+
+        def query_chunks(
+            self,
+            *,
+            run_id: int,
+            query_embedding: list[float],
+            top_k: int,
+            similarity_threshold: float | None = None,
+        ):
             if query_embedding == ["empty"]:
+                assert top_k == 3
+                assert similarity_threshold == 0.9
                 return []
+            if query_embedding == ["override"]:
+                assert top_k == 2
+                assert similarity_threshold == 0.9
+                return [
+                    QueryResult(
+                        chunk_id="fixed:1-introduction:0",
+                        source="rfc9420.txt",
+                        section="1 | Introduction",
+                        content="Chunk body",
+                        score=0.91,
+                    )
+                ]
+            if query_embedding == ["thresholded"]:
+                assert top_k == 3
+                assert similarity_threshold == 0.9
+                return [
+                    QueryResult(
+                        chunk_id="fixed:1-introduction:0",
+                        source="rfc9420.txt",
+                        section="1 | Introduction",
+                        content="Chunk body",
+                        score=0.91,
+                    )
+                ]
+            assert top_k == 3
+            assert similarity_threshold == 0.9
             return [
                 QueryResult(
                     chunk_id="fixed:1-introduction:0",
@@ -91,6 +132,10 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
         def embed_text(self, text: str):
             if text == "empty":
                 return ["empty"]
+            if text == "override":
+                return ["override"]
+            if text == "thresholded":
+                return ["thresholded"]
             if text == "boom":
                 raise RuntimeError("Embedding failed")
             return [0.1, 0.2]
@@ -112,20 +157,28 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             assert "RFC 9420" in (search_tool.description or "")
             assert "Always use this tool" in (search_tool.description or "")
 
-            success = await session.call_tool("search_mls_rfc", {"query": "external commits", "top_k": 5})
+            success = await session.call_tool("search_mls_rfc", {"query": "external commits"})
             assert success.isError is False
             success_payload = success.structuredContent
             assert success_payload["run"]["id"] == 7
             assert success_payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
 
-            empty = await session.call_tool("search_mls_rfc", {"query": "empty", "top_k": 5})
+            empty = await session.call_tool("search_mls_rfc", {"query": "empty"})
             assert empty.isError is False
             assert empty.structuredContent["results"] == []
+
+            override = await session.call_tool("search_mls_rfc", {"query": "override", "top_k": 2})
+            assert override.isError is False
+            assert override.structuredContent["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+
+            thresholded = await session.call_tool("search_mls_rfc", {"query": "thresholded"})
+            assert thresholded.isError is False
+            assert thresholded.structuredContent["results"][0]["chunk_id"] == "fixed:1-introduction:0"
 
             invalid = await session.call_tool("search_mls_rfc", {"query": "external commits", "top_k": 25})
             assert invalid.isError is True
 
-            failing = await session.call_tool("search_mls_rfc", {"query": "boom", "top_k": 5})
+            failing = await session.call_tool("search_mls_rfc", {"query": "boom"})
             assert failing.isError is True
 
     anyio.run(scenario)

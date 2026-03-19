@@ -12,7 +12,13 @@ from rfc_rag.db import Database
 from rfc_rag.embeddings import OpenAIEmbedder
 from rfc_rag.mcp_server import create_mcp_server
 from rfc_rag.parser import parse_sections
-from rfc_rag.search_service import SearchResponse, serialize_search_response, search_chunks
+from rfc_rag.search_service import (
+    SearchResponse,
+    serialize_search_response,
+    search_chunks,
+    validate_score_threshold,
+    validate_top_k,
+)
 
 
 app = typer.Typer(help="RFC 9420 RAG experimentation CLI.")
@@ -112,11 +118,54 @@ def set_active_run(
     typer.echo(f"Active run set to {run.id} ({run.name}).")
 
 
+@app.command("set-top-k")
+def set_top_k(
+    top_k: int = typer.Option(..., help="Default number of results to return."),
+) -> None:
+    """Persist the default top_k used when a query does not provide one."""
+    settings = _load_cli_settings(require_openai=False)
+    try:
+        validated_top_k = validate_top_k(top_k)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    saved_top_k = Database(settings.database_url).set_default_top_k(validated_top_k)
+    typer.echo(f"Default top_k set to {saved_top_k}.")
+
+
+@app.command("set-score-threshold")
+def set_score_threshold(
+    score_threshold: float = typer.Option(
+        ...,
+        help="Default similarity score threshold to apply to query results.",
+    ),
+) -> None:
+    """Persist the default score threshold used to filter query results."""
+    settings = _load_cli_settings(require_openai=False)
+    try:
+        validated_score_threshold = validate_score_threshold(score_threshold)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    saved_score_threshold = Database(settings.database_url).set_default_score_threshold(
+        validated_score_threshold
+    )
+    typer.echo(f"Default score threshold set to {saved_score_threshold:g}.")
+
+
+@app.command("clear-score-threshold")
+def clear_score_threshold() -> None:
+    """Remove the default score threshold so queries return unfiltered results."""
+    settings = _load_cli_settings(require_openai=False)
+    Database(settings.database_url).clear_default_score_threshold()
+    typer.echo("Default score threshold cleared.")
+
+
 @app.command("query")
 def query(
     run_id: int | None = typer.Option(None, min=1, help="Ingestion run ID."),
     query: str = typer.Option(..., help="Search text."),
-    top_k: int = typer.Option(5, min=1, help="Number of results to return."),
+    top_k: int | None = typer.Option(None, help="Number of results to return."),
     json_output: bool = typer.Option(False, "--json", help="Return structured JSON output."),
 ) -> None:
     """Run a similarity search against one ingestion run."""
