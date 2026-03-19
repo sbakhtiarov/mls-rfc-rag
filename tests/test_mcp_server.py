@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import io
+import logging
 
 import anyio
 import pytest
@@ -47,6 +49,14 @@ def test_allowed_hosts_include_loopback_aliases_for_local_and_docker_bindings() 
 def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    log_stream = io.StringIO()
+    logger = logging.getLogger("test.rfc_rag.mcp.search")
+    logger.handlers.clear()
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
     run = IngestionRun(
         id=7,
@@ -88,18 +98,6 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
                 assert top_k == 3
                 assert similarity_threshold == 0.9
                 return []
-            if query_embedding == ["override"]:
-                assert top_k == 2
-                assert similarity_threshold == 0.9
-                return [
-                    QueryResult(
-                        chunk_id="fixed:1-introduction:0",
-                        source="rfc9420.txt",
-                        section="1 | Introduction",
-                        content="Chunk body",
-                        score=0.91,
-                    )
-                ]
             if query_embedding == ["thresholded"]:
                 assert top_k == 3
                 assert similarity_threshold == 0.9
@@ -132,8 +130,6 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
         def embed_text(self, text: str):
             if text == "empty":
                 return ["empty"]
-            if text == "override":
-                return ["override"]
             if text == "thresholded":
                 return ["thresholded"]
             if text == "boom":
@@ -142,12 +138,16 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("rfc_rag.mcp_server.Database", FakeDatabase)
     monkeypatch.setattr("rfc_rag.mcp_server.OpenAIEmbedder", FakeEmbedder)
+    monkeypatch.setattr("rfc_rag.mcp_server._SEARCH_LOGGER", logger)
 
     server = create_mcp_server(
         settings=_settings(),
         host="127.0.0.1",
         port=8001,
     )
+    tool = next(tool for tool in server._tool_manager.list_tools() if tool.name == "search_mls_rfc")
+    assert set(tool.parameters["properties"]) == {"query"}
+    assert tool.parameters["required"] == ["query"]
 
     async def scenario() -> None:
         async with _test_client(server) as session:
@@ -167,21 +167,52 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             assert empty.isError is False
             assert empty.structuredContent["results"] == []
 
-            override = await session.call_tool("search_mls_rfc", {"query": "override", "top_k": 2})
-            assert override.isError is False
-            assert override.structuredContent["results"][0]["chunk_id"] == "fixed:1-introduction:0"
-
             thresholded = await session.call_tool("search_mls_rfc", {"query": "thresholded"})
             assert thresholded.isError is False
             assert thresholded.structuredContent["results"][0]["chunk_id"] == "fixed:1-introduction:0"
-
-            invalid = await session.call_tool("search_mls_rfc", {"query": "external commits", "top_k": 25})
-            assert invalid.isError is True
 
             failing = await session.call_tool("search_mls_rfc", {"query": "boom"})
             assert failing.isError is True
 
     anyio.run(scenario)
+
+    log_lines = [line for line in log_stream.getvalue().splitlines() if line.strip()]
+    assert len(log_lines) == 4
+
+    success_log = next(
+        line for line in log_lines if "status=success" in line and "query='external commits'" in line
+    )
+    assert "rag_search" in success_log
+    assert "requested_top_k=-" in success_log
+    assert "effective_top_k=3" in success_log
+    assert "similarity_score_threshold=0.9" in success_log
+    assert "run_id=7" in success_log
+    assert "run_name='active-run'" in success_log
+    assert "result_count=1" in success_log
+    assert "results=#1 score=0.9100" in success_log
+    assert "chunk_id='fixed:1-introduction:0'" in success_log
+    assert "section='1 | Introduction'" in success_log
+    assert "source='rfc9420.txt'" in success_log
+    assert "error=-" in success_log
+    assert "error_type=-" in success_log
+    assert "elapsed_ms=" in success_log
+
+    empty_log = next(line for line in log_lines if "query='empty'" in line)
+    assert "status=success" in empty_log
+    assert "result_count=0" in empty_log
+    assert "results=none" in empty_log
+
+    failing_log = next(line for line in log_lines if "query='boom'" in line)
+    assert "status=error" in failing_log
+    assert "requested_top_k=-" in failing_log
+    assert "effective_top_k=3" in failing_log
+    assert "similarity_score_threshold=0.9" in failing_log
+    assert "run_id=7" in failing_log
+    assert "run_name='active-run'" in failing_log
+    assert "result_count=0" in failing_log
+    assert "results=none" in failing_log
+    assert "error='Embedding failed'" in failing_log
+    assert "error_type='_SearchStateError'" in failing_log
 
 
 @asynccontextmanager

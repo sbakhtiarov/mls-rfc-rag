@@ -4,7 +4,9 @@ import pytest
 
 from rfc_rag.models import IngestionRun, QueryResult
 from rfc_rag.search_service import (
+    SearchExecutionError,
     SearchResponse,
+    execute_search,
     search_chunks,
     serialize_search_response,
     validate_score_threshold,
@@ -111,6 +113,58 @@ def test_search_chunks_uses_saved_score_threshold_when_present() -> None:
     assert response.results[0].chunk_id == "fixed:1-introduction:0"
 
 
+def test_execute_search_exposes_resolved_metadata_for_logging() -> None:
+    run = _make_run(is_active=True)
+    results = [
+        QueryResult(
+            chunk_id="fixed:1-introduction:0",
+            source="rfc9420.txt",
+            section="1 | Introduction",
+            content="Chunk body",
+            score=0.9,
+        )
+    ]
+
+    execution = execute_search(
+        database=FakeDatabase(
+            run=run,
+            active_run=run,
+            results=results,
+            default_top_k=4,
+            default_score_threshold=0.75,
+        ),
+        embedder=FakeEmbedder(),
+        query="external commits",
+    )
+
+    assert execution.response.results[0].chunk_id == "fixed:1-introduction:0"
+    assert execution.metadata.requested_top_k is None
+    assert execution.metadata.effective_top_k == 4
+    assert execution.metadata.similarity_score_threshold == 0.75
+
+
+def test_execute_search_wraps_runtime_failures_with_partial_metadata() -> None:
+    run = _make_run(is_active=True)
+
+    with pytest.raises(SearchExecutionError, match="Embedding failed") as exc_info:
+        execute_search(
+            database=FakeDatabase(
+                run=run,
+                active_run=run,
+                results=[],
+                default_top_k=3,
+                default_score_threshold=0.8,
+            ),
+            embedder=FailingEmbedder(),
+            query="external commits",
+        )
+
+    assert exc_info.value.metadata.requested_top_k is None
+    assert exc_info.value.metadata.effective_top_k == 3
+    assert exc_info.value.metadata.similarity_score_threshold == 0.8
+    assert exc_info.value.run == run
+
+
 def test_search_chunks_rejects_invalid_saved_score_threshold() -> None:
     run = _make_run(is_active=True)
     with pytest.raises(ValueError, match="score_threshold must be between 0.0 and 1.0 inclusive"):
@@ -179,6 +233,12 @@ class FakeEmbedder:
     def embed_text(self, text: str) -> list[float]:
         assert text == "external commits"
         return [0.5, 0.25]
+
+
+class FailingEmbedder:
+    def embed_text(self, text: str) -> list[float]:
+        assert text == "external commits"
+        raise RuntimeError("Embedding failed")
 
 
 def _make_run(*, is_active: bool) -> IngestionRun:

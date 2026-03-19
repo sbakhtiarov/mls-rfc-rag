@@ -95,7 +95,7 @@ rfc-rag serve-mcp --host 127.0.0.1 --port 8000
 ```
 
 The MCP endpoint is available at `http://127.0.0.1:8000/mcp`, and it exposes a single tool that searches the active run only.
-If the MCP client omits `top_k`, the tool uses the saved default from `set-top-k`, or `5` when no default has been stored. The tool also applies the saved score threshold from `set-score-threshold` when one is configured.
+The tool always uses the saved default from `set-top-k`, or `5` when no default has been stored. It also applies the saved score threshold from `set-score-threshold` when one is configured.
 
 Setup flow:
 
