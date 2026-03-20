@@ -206,6 +206,8 @@ def test_query_json_outputs_run_metadata_and_results(monkeypatch: pytest.MonkeyP
     assert payload["run"]["is_active"] is True
     assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
     assert payload["results"][0]["content"] == "Chunk body"
+    assert payload["results"][0]["citations"][0]["section"] == "1 | Introduction"
+    assert payload["results"][0]["citations"][0]["quote"] == "Chunk body"
 
 
 def test_query_without_run_id_requires_active_run(monkeypatch: pytest.MonkeyPatch) -> None:

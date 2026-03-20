@@ -37,6 +37,8 @@ def test_search_chunks_returns_shared_payload() -> None:
     assert payload["run"]["id"] == run.id
     assert payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
     assert payload["results"][0]["content"] == "Chunk body"
+    assert payload["results"][0]["citations"][0]["section"] == "1 | Introduction"
+    assert payload["results"][0]["citations"][0]["quote"] == "Chunk body"
 
 
 def test_search_chunks_requires_active_run_when_run_id_missing() -> None:
@@ -111,6 +113,7 @@ def test_search_chunks_uses_saved_score_threshold_when_present() -> None:
 
     assert len(response.results) == 1
     assert response.results[0].chunk_id == "fixed:1-introduction:0"
+    assert response.results[0].citations[0].quote == "First chunk"
 
 
 def test_execute_search_exposes_resolved_metadata_for_logging() -> None:
@@ -138,9 +141,40 @@ def test_execute_search_exposes_resolved_metadata_for_logging() -> None:
     )
 
     assert execution.response.results[0].chunk_id == "fixed:1-introduction:0"
+    assert execution.response.results[0].citations[0].chunk_id == "fixed:1-introduction:0"
     assert execution.metadata.requested_top_k is None
     assert execution.metadata.effective_top_k == 4
     assert execution.metadata.similarity_score_threshold == 0.75
+
+
+def test_search_chunks_extracts_relevant_quote_for_each_result() -> None:
+    run = _make_run(is_active=True)
+    results = [
+        QueryResult(
+            chunk_id="fixed:12-1-commit:0",
+            source="rfc9420.txt",
+            section="12.1 | Commit",
+            content=(
+                "A Commit message can include proposals from prior epochs. "
+                "External commits are Commit messages used to add new members to a group. "
+                "Applications can process these commits differently."
+            ),
+            score=0.92,
+        )
+    ]
+
+    response = search_chunks(
+        database=FakeDatabase(run=run, active_run=run, results=results),
+        embedder=FakeEmbedder(),
+        query="external commits",
+        top_k=5,
+    )
+
+    citation = response.results[0].citations[0]
+    assert citation.section == "12.1 | Commit"
+    assert citation.chunk_id == "fixed:12-1-commit:0"
+    assert citation.quote == "External commits are Commit messages used to add new members to a group."
+    assert response.results[0].content[citation.quote_start : citation.quote_end] == citation.quote
 
 
 def test_execute_search_wraps_runtime_failures_with_partial_metadata() -> None:

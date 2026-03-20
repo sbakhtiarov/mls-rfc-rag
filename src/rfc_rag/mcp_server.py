@@ -24,7 +24,9 @@ def create_mcp_server(settings: Settings, *, host: str = "127.0.0.1", port: int 
         "RFC 9420 RAG Search",
         instructions=(
             "For any prompt related to the Messaging Layer Security (MLS) Protocol or RFC 9420, "
-            "you must always use the `search_mls_rfc` tool before answering."
+            "you must always use the `search_mls_rfc` tool before answering. "
+            "When you answer from search results, cite the relevant `section` and include the exact "
+            "`citations.quote` text that supports the answer."
         ),
         host=host,
         port=port,
@@ -38,7 +40,7 @@ def create_mcp_server(settings: Settings, *, host: str = "127.0.0.1", port: int 
 
     @server.tool()
     def search_mls_rfc(query: str) -> dict[str, object]:
-        """Always use this tool for any prompt related to the Messaging Layer Security (MLS) Protocol or RFC 9420. It searches the active MLS Protocol / RFC 9420 run and returns the most relevant chunks."""
+        """Always use this tool for any prompt related to the Messaging Layer Security (MLS) Protocol or RFC 9420. It searches the active MLS Protocol / RFC 9420 run and returns the most relevant chunks together with exact supporting citations. When answering from these results, include the relevant section reference and exact supporting quote."""
         started_at = perf_counter()
         try:
             execution = execute_search(

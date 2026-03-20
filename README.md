@@ -87,6 +87,7 @@ rfc-rag query --query "How does MLS handle external commits?" --json
 ```
 
 If `--top-k` is omitted, `query` uses the saved default from `set-top-k`, or falls back to `5` if none has been saved yet. If a score threshold has been saved with `set-score-threshold`, `query` returns only results whose similarity score is greater than or equal to that threshold. When no threshold is saved, no score filtering is applied.
+Each query result now includes a `citations` array with exact quote text, the source section, the chunk id, and quote offsets within the chunk content.
 
 Serve the active run as an MCP server over local HTTP:
 
@@ -96,6 +97,7 @@ rfc-rag serve-mcp --host 127.0.0.1 --port 8000
 
 The MCP endpoint is available at `http://127.0.0.1:8000/mcp`, and it exposes a single tool that searches the active run only.
 The tool always uses the saved default from `set-top-k`, or `5` when no default has been stored. It also applies the saved score threshold from `set-score-threshold` when one is configured.
+The tool response includes `results[*].citations[*]` so an MCP client can ground its answer with a section reference and verbatim supporting quote.
 
 Setup flow:
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -40,3 +40,14 @@ class QueryResult:
     section: str
     content: str
     score: float
+    citations: list["Citation"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Citation:
+    source: str
+    section: str
+    chunk_id: str
+    quote: str
+    quote_start: int
+    quote_end: int

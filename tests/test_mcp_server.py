@@ -145,6 +145,9 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
         host="127.0.0.1",
         port=8001,
     )
+    assert server.instructions is not None
+    assert "cite the relevant `section`" in server.instructions
+    assert "`citations.quote`" in server.instructions
     tool = next(tool for tool in server._tool_manager.list_tools() if tool.name == "search_mls_rfc")
     assert set(tool.parameters["properties"]) == {"query"}
     assert tool.parameters["required"] == ["query"]
@@ -156,12 +159,17 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             assert "Messaging Layer Security" in (search_tool.description or "")
             assert "RFC 9420" in (search_tool.description or "")
             assert "Always use this tool" in (search_tool.description or "")
+            assert "exact supporting citations" in (search_tool.description or "")
+            assert "section reference" in (search_tool.description or "")
+            assert "exact supporting quote" in (search_tool.description or "")
 
             success = await session.call_tool("search_mls_rfc", {"query": "external commits"})
             assert success.isError is False
             success_payload = success.structuredContent
             assert success_payload["run"]["id"] == 7
             assert success_payload["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+            assert success_payload["results"][0]["citations"][0]["section"] == "1 | Introduction"
+            assert success_payload["results"][0]["citations"][0]["quote"] == "Chunk body"
 
             empty = await session.call_tool("search_mls_rfc", {"query": "empty"})
             assert empty.isError is False
@@ -170,6 +178,7 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             thresholded = await session.call_tool("search_mls_rfc", {"query": "thresholded"})
             assert thresholded.isError is False
             assert thresholded.structuredContent["results"][0]["chunk_id"] == "fixed:1-introduction:0"
+            assert thresholded.structuredContent["results"][0]["citations"][0]["quote"] == "Chunk body"
 
             failing = await session.call_tool("search_mls_rfc", {"query": "boom"})
             assert failing.isError is True

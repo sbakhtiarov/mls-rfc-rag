@@ -2,14 +2,48 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
+import re
 from typing import Protocol
 
 from rfc_rag.db import Database
-from rfc_rag.models import IngestionRun, QueryResult
+from rfc_rag.models import Citation, IngestionRun, QueryResult
 
 
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 20
+MAX_CITATION_LENGTH = 280
+MIN_QUERY_TOKEN_LENGTH = 3
+_QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_BLOCK_SPLIT_PATTERN = re.compile(r"\n\s*\n")
+_SENTENCE_PATTERN = re.compile(r"[^.!?]+[.!?](?:\s+|$)|[^.!?]+$")
+_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
 
 
 class EmbedderProtocol(Protocol):
@@ -212,15 +246,178 @@ def _perform_search(
             active_embedder = embedder_factory(run.embedding_model)
 
         query_embedding = active_embedder.embed_text(query)
-        results = database.query_chunks(
+        raw_results = database.query_chunks(
             run_id=run.id,
             query_embedding=query_embedding,
             top_k=active_metadata.effective_top_k or DEFAULT_TOP_K,
             similarity_threshold=active_metadata.similarity_score_threshold,
         )
+        results = _attach_citations(results=raw_results, query=query)
         return SearchExecution(
             response=SearchResponse(run=run, results=results),
             metadata=active_metadata,
         )
     except Exception as exc:
         raise _SearchStateError(metadata=active_metadata, run=run) from exc
+
+
+def _attach_citations(*, results: list[QueryResult], query: str) -> list[QueryResult]:
+    return [replace(result, citations=[_extract_citation(result=result, query=query)]) for result in results]
+
+
+def _extract_citation(*, result: QueryResult, query: str) -> Citation:
+    content = result.content
+    quote_start, quote_end = _select_quote_span(content=content, query=query)
+    quote = content[quote_start:quote_end].strip()
+    if not quote:
+        quote = content.strip()
+        quote_start = content.find(quote) if quote else 0
+        quote_end = quote_start + len(quote)
+
+    return Citation(
+        source=result.source,
+        section=result.section,
+        chunk_id=result.chunk_id,
+        quote=quote,
+        quote_start=quote_start,
+        quote_end=quote_end,
+    )
+
+
+def _select_quote_span(*, content: str, query: str) -> tuple[int, int]:
+    candidates = _build_quote_candidates(content)
+    if not candidates:
+        return (0, len(content))
+
+    query_tokens = _query_tokens(query)
+    best_candidate = max(
+        candidates,
+        key=lambda candidate: _score_candidate(candidate[2], query_tokens),
+    )
+    return _trim_span(
+        content=content,
+        start=best_candidate[0],
+        end=best_candidate[1],
+        query_tokens=query_tokens,
+    )
+
+
+def _build_quote_candidates(content: str) -> list[tuple[int, int, str]]:
+    candidates: list[tuple[int, int, str]] = []
+
+    for block_start, block_end in _iter_block_spans(content):
+        block_text = content[block_start:block_end]
+        if not block_text.strip():
+            continue
+
+        sentence_spans = _iter_sentence_spans(block_text, block_start)
+        if sentence_spans:
+            candidates.extend(sentence_spans)
+            if len(sentence_spans) > 1:
+                for first, second in zip(sentence_spans, sentence_spans[1:], strict=False):
+                    combined_text = content[first[0] : second[1]]
+                    candidates.append((first[0], second[1], combined_text))
+        else:
+            candidates.append((block_start, block_end, block_text))
+
+    if not candidates and content.strip():
+        candidates.append((0, len(content), content))
+
+    return candidates
+
+
+def _iter_block_spans(content: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in _BLOCK_SPLIT_PATTERN.finditer(content):
+        spans.append((start, match.start()))
+        start = match.end()
+    spans.append((start, len(content)))
+    return spans
+
+
+def _iter_sentence_spans(block_text: str, block_start: int) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in _SENTENCE_PATTERN.finditer(block_text):
+        sentence = match.group(0).strip()
+        if not sentence:
+            continue
+        leading_padding = len(match.group(0)) - len(match.group(0).lstrip())
+        absolute_start = block_start + match.start() + leading_padding
+        absolute_end = absolute_start + len(sentence)
+        spans.append((absolute_start, absolute_end, sentence))
+    return spans
+
+
+def _query_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _QUERY_TOKEN_PATTERN.findall(text.lower())
+        if len(token) >= MIN_QUERY_TOKEN_LENGTH and token not in _STOP_WORDS
+    }
+
+
+def _score_candidate(candidate_text: str, query_tokens: set[str]) -> tuple[float, int, int]:
+    candidate_tokens = _query_tokens(candidate_text)
+    overlap = query_tokens & candidate_tokens
+    overlap_score = float(len(overlap))
+    exact_phrase_bonus = 0
+    lowered_candidate = candidate_text.lower()
+    for token in query_tokens:
+        if token in lowered_candidate:
+            exact_phrase_bonus += 1
+    nonempty_bonus = 1 if candidate_text.strip() else 0
+    return (
+        overlap_score * 10 + exact_phrase_bonus,
+        nonempty_bonus,
+        -len(candidate_text.strip()),
+    )
+
+
+def _trim_span(
+    *,
+    content: str,
+    start: int,
+    end: int,
+    query_tokens: set[str],
+) -> tuple[int, int]:
+    quote = content[start:end].strip()
+    if len(quote) <= MAX_CITATION_LENGTH:
+        return _normalize_span(content=content, start=start, end=end)
+
+    if not query_tokens:
+        return _normalize_span(content=content, start=start, end=min(start + MAX_CITATION_LENGTH, end))
+
+    lowered_quote = quote.lower()
+    anchor = next((lowered_quote.find(token) for token in query_tokens if lowered_quote.find(token) >= 0), -1)
+    if anchor < 0:
+        return _normalize_span(content=content, start=start, end=min(start + MAX_CITATION_LENGTH, end))
+
+    window_start = max(0, anchor - MAX_CITATION_LENGTH // 3)
+    window_end = min(len(quote), window_start + MAX_CITATION_LENGTH)
+    relative_start = _advance_to_word_boundary(quote, window_start, forward=True)
+    relative_end = _advance_to_word_boundary(quote, window_end, forward=False)
+    trimmed_start = start + relative_start
+    trimmed_end = start + max(relative_end, relative_start + 1)
+    return _normalize_span(content=content, start=trimmed_start, end=trimmed_end)
+
+
+def _normalize_span(*, content: str, start: int, end: int) -> tuple[int, int]:
+    bounded_start = max(0, min(start, len(content)))
+    bounded_end = max(bounded_start, min(end, len(content)))
+    while bounded_start < bounded_end and content[bounded_start].isspace():
+        bounded_start += 1
+    while bounded_end > bounded_start and content[bounded_end - 1].isspace():
+        bounded_end -= 1
+    return (bounded_start, bounded_end)
+
+
+def _advance_to_word_boundary(text: str, index: int, *, forward: bool) -> int:
+    bounded_index = max(0, min(index, len(text)))
+    if forward:
+        while bounded_index < len(text) and not text[bounded_index].isalnum():
+            bounded_index += 1
+    else:
+        while bounded_index > 0 and not text[bounded_index - 1].isalnum():
+            bounded_index -= 1
+    return bounded_index

@@ -201,6 +201,8 @@ def query(
         typer.echo(f"chunk_id={result.chunk_id}")
         typer.echo(f"source={result.source}")
         typer.echo(f"section={result.section}")
+        if result.citations:
+            typer.echo(f"citation_quote={_preview_text(result.citations[0].quote)}")
         typer.echo(f"preview={_preview_text(result.content)}")
         typer.echo("")
 
