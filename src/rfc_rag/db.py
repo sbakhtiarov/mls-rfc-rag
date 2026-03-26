@@ -9,6 +9,8 @@ from rfc_rag.config import EMBEDDING_DIMENSION
 from rfc_rag.models import Chunk, IngestionRun, QueryResult
 
 
+EXPECTED_EMBEDDING_VECTOR_TYPE = f"vector({EMBEDDING_DIMENSION})"
+
 SCHEMA_SQL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -56,6 +58,33 @@ ALTER TABLE app_settings
 ADD COLUMN IF NOT EXISTS default_score_threshold DOUBLE PRECISION NULL;
 """
 
+SCHEMA_VALIDATION_SQL = """
+SELECT format_type(a.atttypid, a.atttypmod) AS embedding_type
+FROM pg_attribute AS a
+JOIN pg_class AS c ON c.oid = a.attrelid
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE c.relname = 'chunks'
+  AND a.attname = 'embedding'
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY
+    CASE
+        WHEN n.nspname = current_schema() THEN 0
+        WHEN n.nspname = 'public' THEN 1
+        ELSE 2
+    END,
+    n.nspname
+LIMIT 1
+"""
+
+SCHEMA_COMPATIBILITY_ERROR = (
+    "Database schema is incompatible with the configured embedding model: "
+    f"expected chunks.embedding to use {EXPECTED_EMBEDDING_VECTOR_TYPE}. "
+    "Existing 1536-dimension runs are not supported. Recreate the database schema "
+    "and re-ingest all runs by dropping the existing data, running `rfc-rag init-db`, "
+    "and then running `rfc-rag ingest` again."
+)
+
 
 class Database:
     def __init__(self, dsn: str) -> None:
@@ -66,6 +95,7 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
                 cur.execute(ALTER_SCHEMA_SQL)
+                self._validate_embedding_schema(cur)
 
     def create_run_with_chunks(
         self,
@@ -83,6 +113,7 @@ class Database:
 
         with psycopg.connect(self._dsn) as conn:
             with conn.cursor() as cur:
+                self._validate_embedding_schema(cur)
                 cur.execute(
                     """
                     INSERT INTO ingestion_runs (
@@ -315,6 +346,7 @@ class Database:
     ) -> list[QueryResult]:
         with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
+                self._validate_embedding_schema(cur)
                 formatted_vector = _format_vector(query_embedding)
                 if similarity_threshold is None:
                     cur.execute(
@@ -359,6 +391,18 @@ class Database:
                 rows = cur.fetchall()
 
         return [QueryResult(**row) for row in rows]
+
+    def _validate_embedding_schema(self, cursor) -> None:
+        cursor.execute(SCHEMA_VALIDATION_SQL)
+        row = cursor.fetchone()
+        if row is None:
+            return
+
+        embedding_type = row["embedding_type"] if isinstance(row, dict) else row[0]
+        if embedding_type != EXPECTED_EMBEDDING_VECTOR_TYPE:
+            raise ValueError(
+                f"{SCHEMA_COMPATIBILITY_ERROR} Found {embedding_type!r}."
+            )
 
 
 def _format_vector(values: Sequence[float]) -> str:

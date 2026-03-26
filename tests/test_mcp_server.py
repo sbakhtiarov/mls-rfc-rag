@@ -22,9 +22,8 @@ from rfc_rag.models import IngestionRun, QueryResult
 RUNNER = CliRunner()
 
 
-def test_serve_mcp_requires_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serve_mcp_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     result = RUNNER.invoke(app, ["serve-mcp"])
 
@@ -48,7 +47,6 @@ def test_allowed_hosts_include_loopback_aliases_for_local_and_docker_bindings() 
 
 def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     log_stream = io.StringIO()
     logger = logging.getLogger("test.rfc_rag.mcp.search")
     logger.handlers.clear()
@@ -123,8 +121,8 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             ]
 
     class FakeEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str):
@@ -137,7 +135,7 @@ def test_mcp_search_tool_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> 
             return [0.1, 0.2]
 
     monkeypatch.setattr("rfc_rag.mcp_server.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.mcp_server.OpenAIEmbedder", FakeEmbedder)
+    monkeypatch.setattr("rfc_rag.mcp_server.OllamaEmbedder", FakeEmbedder)
     monkeypatch.setattr("rfc_rag.mcp_server._SEARCH_LOGGER", logger)
 
     server = create_mcp_server(
@@ -255,6 +253,6 @@ def _settings():
 
     return Settings(
         database_url="postgresql://example",
-        openai_api_key="test-key",
-        openai_embed_model="fake-embedding-model",
+        ollama_host="http://127.0.0.1:11434",
+        ollama_embed_model="fake-embedding-model",
     )

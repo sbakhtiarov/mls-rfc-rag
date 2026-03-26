@@ -30,7 +30,7 @@ class FakeEmbedder:
 
 def _fake_embedding(text: str) -> list[float]:
     seed = sum(ord(char) for char in text) % 97
-    return [float(seed)] * 1536
+    return [float(seed)] * 768
 
 
 @pytest.mark.integration
@@ -135,7 +135,6 @@ def test_active_run_lifecycle_uses_only_one_active_run() -> None:
 
 def test_query_json_outputs_run_metadata_and_results(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     created_at = datetime(2026, 3, 18, 12, 0, tzinfo=timezone.utc)
 
@@ -186,16 +185,16 @@ def test_query_json_outputs_run_metadata_and_results(monkeypatch: pytest.MonkeyP
                 )
             ]
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--top-k", "2", "--json"])
 
@@ -212,7 +211,6 @@ def test_query_json_outputs_run_metadata_and_results(monkeypatch: pytest.MonkeyP
 
 def test_query_without_run_id_requires_active_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -237,7 +235,6 @@ def test_query_without_run_id_requires_active_run(monkeypatch: pytest.MonkeyPatc
 
 def test_query_rejects_top_k_above_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -261,16 +258,16 @@ def test_query_rejects_top_k_above_limit(monkeypatch: pytest.MonkeyPatch) -> Non
                 is_active=True,
             )
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--top-k", str(MAX_TOP_K + 1)])
 
@@ -359,7 +356,6 @@ def test_clear_score_threshold_clears_default(monkeypatch: pytest.MonkeyPatch) -
 
 def test_query_uses_saved_default_top_k_when_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -403,16 +399,16 @@ def test_query_uses_saved_default_top_k_when_omitted(monkeypatch: pytest.MonkeyP
                 )
             ]
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
 
@@ -423,7 +419,6 @@ def test_query_uses_saved_default_top_k_when_omitted(monkeypatch: pytest.MonkeyP
 
 def test_query_explicit_top_k_overrides_saved_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -467,16 +462,16 @@ def test_query_explicit_top_k_overrides_saved_default(monkeypatch: pytest.Monkey
                 )
             ]
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--top-k", "2", "--json"])
 
@@ -487,7 +482,6 @@ def test_query_explicit_top_k_overrides_saved_default(monkeypatch: pytest.Monkey
 
 def test_query_uses_builtin_default_top_k_when_nothing_saved(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -531,16 +525,16 @@ def test_query_uses_builtin_default_top_k_when_nothing_saved(monkeypatch: pytest
                 )
             ]
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
 
@@ -551,7 +545,6 @@ def test_query_uses_builtin_default_top_k_when_nothing_saved(monkeypatch: pytest
 
 def test_query_uses_saved_score_threshold_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -595,16 +588,16 @@ def test_query_uses_saved_score_threshold_when_present(monkeypatch: pytest.Monke
                 )
             ]
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits", "--json"])
 
@@ -617,7 +610,6 @@ def test_query_reports_no_results_when_saved_score_threshold_filters_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     class FakeDatabase:
         def __init__(self, dsn: str) -> None:
@@ -652,16 +644,16 @@ def test_query_reports_no_results_when_saved_score_threshold_filters_all(
             assert similarity_threshold == 0.95
             return []
 
-    class FakeOpenAIEmbedder:
-        def __init__(self, api_key: str, model: str) -> None:
-            self.api_key = api_key
+    class FakeOllamaEmbedder:
+        def __init__(self, host: str, model: str) -> None:
+            self.host = host
             self.model = model
 
         def embed_text(self, text: str) -> list[float]:
             return _fake_embedding(text)
 
     monkeypatch.setattr("rfc_rag.cli.Database", FakeDatabase)
-    monkeypatch.setattr("rfc_rag.cli.OpenAIEmbedder", FakeOpenAIEmbedder)
+    monkeypatch.setattr("rfc_rag.cli.OllamaEmbedder", FakeOllamaEmbedder)
 
     result = RUNNER.invoke(app, ["query", "--query", "external commits"])
 

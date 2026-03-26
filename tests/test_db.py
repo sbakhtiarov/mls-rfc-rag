@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from rfc_rag.db import Database, SCHEMA_SQL
+import pytest
+
+from rfc_rag.db import Database, SCHEMA_COMPATIBILITY_ERROR, SCHEMA_SQL
 
 
 def test_init_db_executes_schema_with_app_settings(monkeypatch) -> None:
@@ -88,25 +90,38 @@ def test_clear_default_score_threshold_upserts_null_and_commits(monkeypatch) -> 
 
 
 def test_query_chunks_uses_similarity_threshold_when_present(monkeypatch) -> None:
-    cursor = RecordingCursor(fetchall_result=[])
+    cursor = RecordingCursor(fetchone_results=[("vector(768)",)], fetchall_result=[])
     connection = RecordingConnection(cursor)
 
     monkeypatch.setattr("rfc_rag.db.psycopg.connect", lambda dsn, **kwargs: connection)
 
     results = Database("postgresql://example").query_chunks(
         run_id=4,
-        query_embedding=[0.1] * 1536,
+        query_embedding=[0.1] * 768,
         top_k=3,
         similarity_threshold=0.75,
     )
 
     assert results == []
-    assert "AND (embedding <=> %s::vector) <= %s" in cursor.executed[0][0]
-    assert cursor.executed[0][1][3] == 0.25
-    assert cursor.executed[0][1][-2:] == (
-        cursor.executed[0][1][0],
+    assert "SELECT format_type" in cursor.executed[0][0]
+    assert "AND (embedding <=> %s::vector) <= %s" in cursor.executed[-1][0]
+    assert cursor.executed[-1][1][3] == 0.25
+    assert cursor.executed[-1][1][-2:] == (
+        cursor.executed[-1][1][0],
         3,
     )
+
+
+def test_init_db_rejects_incompatible_existing_embedding_dimension(monkeypatch) -> None:
+    cursor = RecordingCursor(fetchone_result=("vector(1536)",))
+    connection = RecordingConnection(cursor)
+
+    monkeypatch.setattr("rfc_rag.db.psycopg.connect", lambda dsn, **kwargs: connection)
+
+    with pytest.raises(ValueError, match="vector\\(1536\\)") as exc_info:
+        Database("postgresql://example").init_db()
+
+    assert SCHEMA_COMPATIBILITY_ERROR in str(exc_info.value)
 
 
 class RecordingConnection:
@@ -128,15 +143,20 @@ class RecordingConnection:
 
 
 class RecordingCursor:
-    def __init__(self, *, fetchone_result=None, fetchall_result=None) -> None:
+    def __init__(self, *, fetchone_result=None, fetchone_results=None, fetchall_result=None) -> None:
         self.executed: list[tuple[str, tuple[object, ...] | None]] = []
         self._fetchone_result = fetchone_result
+        self._fetchone_results = list(fetchone_results) if fetchone_results is not None else None
         self._fetchall_result = fetchall_result or []
 
     def execute(self, sql: str, params=None) -> None:
         self.executed.append((sql, params))
 
     def fetchone(self):
+        if self._fetchone_results is not None:
+            if not self._fetchone_results:
+                return None
+            return self._fetchone_results.pop(0)
         return self._fetchone_result
 
     def fetchall(self):

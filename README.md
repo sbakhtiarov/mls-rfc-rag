@@ -1,14 +1,24 @@
 # RFC 9420 RAG CLI
 
-This project ingests [`rfc9420.txt`](./rfc9420.txt) into Postgres with `pgvector`, using either fixed-size chunks or section-aware chunks, and lets you run similarity queries against an ingestion run.
+This project ingests [`rfc9420.txt`](./rfc9420.txt) into Postgres with `pgvector`, using either fixed-size chunks or section-aware chunks, and lets you run similarity queries against an ingestion run with local Ollama embeddings.
 
 ## Prerequisites
 
 - Python 3.14+
 - A Postgres database with the `pgvector` extension available
 - `DATABASE_URL`
-- `OPENAI_API_KEY`
-- Optional: `OPENAI_EMBED_MODEL` (defaults to `text-embedding-3-small`)
+- Ollama running locally
+- Optional: `OLLAMA_HOST` (defaults to `http://127.0.0.1:11434`)
+- Optional: `OLLAMA_EMBED_MODEL` (defaults to `nomic-embed-text`)
+
+Prepare the local embedding model:
+
+```bash
+ollama serve
+ollama pull nomic-embed-text
+```
+
+This project now uses 768-dimension Ollama embeddings. If you previously ingested data with the old 1536-dimension OpenAI setup, reset the database or volume, run `rfc-rag init-db`, and re-ingest your runs.
 
 ## Install
 
@@ -133,27 +143,31 @@ By default, the MCP endpoint is exposed at:
 http://127.0.0.1:8000/mcp
 ```
 
-Required environment:
+Required local services:
 
 ```bash
-export OPENAI_API_KEY="..."
+ollama serve
+ollama pull nomic-embed-text
 ```
 
-You can override these Docker-specific settings before startup:
+You can optionally override these settings before startup:
 
 - `POSTGRES_DB`
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
 - `POSTGRES_PORT`
 - `MCP_PORT`
-- `OPENAI_EMBED_MODEL`
+- `OLLAMA_HOST`
+- `OLLAMA_EMBED_MODEL`
 
 The MCP container already receives its internal `DATABASE_URL` automatically through Compose, so you do not need to set that manually for the containerized setup.
+By default it reaches Ollama on the host via `http://host.docker.internal:11434`.
 
 Typical Docker workflow:
 
 ```bash
-export OPENAI_API_KEY="..."
+ollama serve
+ollama pull nomic-embed-text
 docker compose up -d --build
 docker compose exec mcp rfc-rag ingest --source /app/rfc9420.txt --strategy fixed --chunk-size 1200
 docker compose exec mcp rfc-rag set-active-run --run-id 1

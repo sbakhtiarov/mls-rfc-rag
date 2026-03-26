@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
   "mcp[cli]>=1.26.0",
-  "openai>=1.76.0",
+  "ollama>=0.6.0",
   "psycopg[binary]>=3.2.6",
   "typer>=0.16.0",
 ]

@@ -10,7 +10,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from rfc_rag.config import Settings
 from rfc_rag.db import Database
-from rfc_rag.embeddings import OpenAIEmbedder
+from rfc_rag.embeddings import OllamaEmbedder
 from rfc_rag.search_service import (
     SearchExecution,
     SearchExecutionError,
@@ -45,10 +45,7 @@ def create_mcp_server(settings: Settings, *, host: str = "127.0.0.1", port: int 
         try:
             execution = execute_search(
                 database=Database(settings.database_url),
-                embedder_factory=lambda model: OpenAIEmbedder(
-                    api_key=settings.openai_api_key or "",
-                    model=model,
-                ),
+                embedder_factory=lambda model: OllamaEmbedder(host=settings.ollama_host, model=model),
                 query=query,
             )
         except SearchExecutionError as exc:

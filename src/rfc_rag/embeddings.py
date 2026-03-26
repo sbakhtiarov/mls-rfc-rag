@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from openai import OpenAI
+from ollama import Client
 
 from rfc_rag.config import EMBEDDING_DIMENSION
 
 
-class OpenAIEmbedder:
-    def __init__(self, api_key: str, model: str) -> None:
+class OllamaEmbedder:
+    def __init__(self, host: str, model: str) -> None:
+        self.host = host
         self.model = model
-        self._client = OpenAI(api_key=api_key)
+        self._client = Client(host=host)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(model=self.model, input=texts)
-        embeddings = [item.embedding for item in response.data]
+        response = self._client.embed(model=self.model, input=texts)
+        embeddings = response["embeddings"] if isinstance(response, dict) else response.embeddings
         for embedding in embeddings:
             _validate_embedding_dimension(embedding)
         return embeddings

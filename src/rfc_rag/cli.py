@@ -9,7 +9,7 @@ import typer
 from rfc_rag.chunking import chunk_sections
 from rfc_rag.config import Settings, load_settings
 from rfc_rag.db import Database
-from rfc_rag.embeddings import OpenAIEmbedder
+from rfc_rag.embeddings import OllamaEmbedder
 from rfc_rag.mcp_server import create_mcp_server
 from rfc_rag.parser import parse_sections
 from rfc_rag.search_service import (
@@ -32,7 +32,7 @@ class ChunkStrategy(StrEnum):
 @app.command("init-db")
 def init_db() -> None:
     """Create the database schema and pgvector index."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     Database(settings.database_url).init_db()
     typer.echo("Database initialized.")
 
@@ -45,7 +45,7 @@ def ingest(
     name: str | None = typer.Option(None, help="Optional label for this ingestion run."),
 ) -> None:
     """Parse, chunk, embed, and store a source file."""
-    settings = _load_cli_settings(require_openai=True)
+    settings = _load_cli_settings()
     raw_text = source.read_text(encoding="utf-8-sig")
     sections = parse_sections(raw_text)
     source_label = str(source)
@@ -59,10 +59,7 @@ def ingest(
     if not chunks:
         raise typer.BadParameter("No chunks were produced from the source document.")
 
-    embedder = OpenAIEmbedder(
-        api_key=settings.openai_api_key or "",
-        model=settings.openai_embed_model,
-    )
+    embedder = OllamaEmbedder(host=settings.ollama_host, model=settings.ollama_embed_model)
     embeddings = embedder.embed_texts([chunk.content for chunk in chunks])
 
     run_name = name or f"{source.stem}-{strategy.value}-{chunk_size}"
@@ -71,7 +68,7 @@ def ingest(
         source=source_label,
         strategy=strategy.value,
         chunk_size=chunk_size,
-        embedding_model=settings.openai_embed_model,
+        embedding_model=settings.ollama_embed_model,
         chunks=chunks,
         embeddings=embeddings,
     )
@@ -82,7 +79,7 @@ def ingest(
 @app.command("list-runs")
 def list_runs() -> None:
     """List ingestion runs."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     runs = Database(settings.database_url).list_runs()
     if not runs:
         typer.echo("No ingestion runs found.")
@@ -110,7 +107,7 @@ def set_active_run(
     run_id: int = typer.Option(..., min=1, help="Ingestion run ID to mark as active."),
 ) -> None:
     """Mark one ingestion run as the active default for queries."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     run = Database(settings.database_url).set_active_run(run_id)
     if run is None:
         raise typer.BadParameter(f"Run {run_id} does not exist.")
@@ -123,7 +120,7 @@ def set_top_k(
     top_k: int = typer.Option(..., help="Default number of results to return."),
 ) -> None:
     """Persist the default top_k used when a query does not provide one."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     try:
         validated_top_k = validate_top_k(top_k)
     except ValueError as exc:
@@ -141,7 +138,7 @@ def set_score_threshold(
     ),
 ) -> None:
     """Persist the default score threshold used to filter query results."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     try:
         validated_score_threshold = validate_score_threshold(score_threshold)
     except ValueError as exc:
@@ -156,7 +153,7 @@ def set_score_threshold(
 @app.command("clear-score-threshold")
 def clear_score_threshold() -> None:
     """Remove the default score threshold so queries return unfiltered results."""
-    settings = _load_cli_settings(require_openai=False)
+    settings = _load_cli_settings()
     Database(settings.database_url).clear_default_score_threshold()
     typer.echo("Default score threshold cleared.")
 
@@ -169,15 +166,12 @@ def query(
     json_output: bool = typer.Option(False, "--json", help="Return structured JSON output."),
 ) -> None:
     """Run a similarity search against one ingestion run."""
-    settings = _load_cli_settings(require_openai=True)
+    settings = _load_cli_settings()
     database = Database(settings.database_url)
     try:
         response = search_chunks(
             database=database,
-            embedder_factory=lambda model: OpenAIEmbedder(
-                api_key=settings.openai_api_key or "",
-                model=model,
-            ),
+            embedder_factory=lambda model: OllamaEmbedder(host=settings.ollama_host, model=model),
             query=query,
             top_k=top_k,
             run_id=run_id,
@@ -213,7 +207,7 @@ def serve_mcp(
     port: int = typer.Option(8000, min=1, max=65535, help="Port for the MCP HTTP server."),
 ) -> None:
     """Serve the RAG search tool as an MCP streamable HTTP server."""
-    settings = _load_cli_settings(require_openai=True)
+    settings = _load_cli_settings()
     server = create_mcp_server(settings, host=host, port=port)
     server.run(transport="streamable-http")
 
@@ -222,9 +216,9 @@ def main() -> None:
     app()
 
 
-def _load_cli_settings(*, require_openai: bool) -> Settings:
+def _load_cli_settings() -> Settings:
     try:
-        return load_settings(require_openai=require_openai)
+        return load_settings()
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
